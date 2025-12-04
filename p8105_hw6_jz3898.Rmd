@@ -1,0 +1,466 @@
+---
+title: "p8105_hw6_jz3898"
+author: "Jiaqi Zhu (jz3898)"
+date: "`r Sys.Date()`"
+output: github_document
+---
+
+```{r problem1, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(broom)
+
+# === LOAD DATA ===
+homicide_data = read_csv(
+  "https://raw.githubusercontent.com/washingtonpost/data-homicides/master/homicide-data.csv"
+)
+
+# === DATA CLEANING ===
+homicide_clean = homicide_data |>
+  # Create city_state variable
+  mutate(
+    city_state = str_c(city, ", ", state)
+  ) |>
+  # Create binary solved variable
+  mutate(
+    solved = case_when(
+      disposition == "Closed by arrest" ~ 1,
+      disposition %in% c("Closed without arrest", "Open/No arrest") ~ 0
+    )
+  ) |>
+  # Omit specified cities
+  filter(
+    !city_state %in% c("Dallas, TX", "Phoenix, AZ", "Kansas City, MO", "Tulsa, AL")
+  ) |>
+  # Limit to white or black victims
+  filter(victim_race %in% c("White", "Black")) |>
+  # Convert victim_age to numeric
+  mutate(
+    victim_age = as.numeric(victim_age),
+    victim_sex = factor(victim_sex),
+    victim_race = factor(victim_race)
+  ) |>
+  # Remove missing values
+  filter(!is.na(victim_age))
+
+# === BALTIMORE LOGISTIC REGRESSION ===
+baltimore_data = homicide_clean |>
+  filter(city_state == "Baltimore, MD")
+
+# Fit logistic regression
+baltimore_model = glm(
+  solved ~ victim_age + victim_sex + victim_race,
+  data = baltimore_data,
+  family = binomial()
+)
+
+# Get tidy output and calculate OR with CI
+baltimore_results = baltimore_model |>
+  broom::tidy() |>
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |>
+  filter(term == "victim_sexMale") |>
+  select(term, OR, CI_lower, CI_upper)
+
+# Display Baltimore results
+knitr::kable(
+  baltimore_results,
+  digits = 3,
+  col.names = c("Term", "Odds Ratio", "CI Lower", "CI Upper"),
+  caption = "Baltimore, MD: Adjusted OR for Solving Homicides (Male vs Female Victims)"
+)
+
+# === ALL CITIES LOGISTIC REGRESSION ===
+# Nest data by city
+city_models = homicide_clean |>
+  group_by(city_state) |>
+  nest() |>
+  # Fit logistic regression for each city
+  mutate(
+    model = map(data, ~glm(
+      solved ~ victim_age + victim_sex + victim_race,
+      data = .x,
+      family = binomial()
+    )),
+    results = map(model, broom::tidy)
+  ) |>
+  # Extract results
+  select(city_state, results) |>
+  unnest(results) |>
+  # Calculate OR and CI
+  mutate(
+    OR = exp(estimate),
+    CI_lower = exp(estimate - 1.96 * std.error),
+    CI_upper = exp(estimate + 1.96 * std.error)
+  ) |>
+  # Filter for victim_sex term
+  filter(term == "victim_sexMale") |>
+  select(city_state, OR, CI_lower, CI_upper)
+
+# === PLOT ===
+city_models |>
+  # Order cities by OR
+  mutate(city_state = fct_reorder(city_state, OR)) |>
+  ggplot(aes(x = city_state, y = OR)) +
+  geom_point(color = "steelblue", size = 2) +
+  geom_errorbar(
+    aes(ymin = CI_lower, ymax = CI_upper),
+    width = 0.3,
+    color = "steelblue"
+  ) +
+  geom_hline(yintercept = 1, linetype = "dashed", color = "red") +
+  coord_flip() +
+  labs(
+    title = "Adjusted Odds Ratios for Solving Homicides: Male vs Female Victims",
+    subtitle = "Controlling for victim age and race",
+    x = "City",
+    y = "Odds Ratio (Male vs Female)",
+    caption = "Error bars represent 95% confidence intervals"
+  ) +
+  theme_minimal() +
+  theme(
+    plot.title = element_text(face = "bold", size = 12),
+    axis.text.y = element_text(size = 8)
+  )
+```
+```
+
+---
+```
+## Problem 1: Homicide Logistic Regression Analysis
+
+### Baltimore, MD Results
+
+For Baltimore, MD, the adjusted odds ratio for solving homicides comparing male victims to female victims is approximately 0.426 (95% CI: 0.325, 0.558), controlling for victim age and race. This indicates that homicides with male victims have significantly lower odds of being solved compared to those with female victims - about 57% lower odds.
+
+### All Cities Analysis
+
+The plot shows substantial variation in adjusted odds ratios across cities. Most cities have OR < 1, indicating that homicides with male victims are generally less likely to be solved than those with female victims.
+
+**New York, NY** shows the lowest OR (~0.26), with male victim homicides having approximately 74% lower odds of being solved. In contrast, **Albuquerque, NM** has the highest OR (~1.77), one of the few cities where male victim homicides have higher odds of being solved. Cities like **Fresno, CA** and **Stockton, CA** have wide confidence intervals, suggesting greater uncertainty likely due to smaller sample sizes.
+
+Most confidence intervals do not cross 1.0, indicating statistically significant gender differences in clearance rates. This pattern suggests that gender plays a significant role in homicide investigations across U.S. cities, with female victim homicides generally receiving more investigative attention or having characteristics that facilitate case resolution.
+
+```{r problem2, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(modelr)
+library(p8105.datasets)
+
+# === LOAD DATA ===
+data("weather_df")
+
+# Clean weather data
+weather_clean = weather_df |>
+  filter(name == "CentralPark_NY") |>
+  select(tmax, tmin, prcp)
+
+# === BOOTSTRAP FUNCTION ===
+set.seed(123)
+
+# Create bootstrap samples
+boot_results = weather_clean |>
+  modelr::bootstrap(n = 5000) |>
+  mutate(
+    # Fit model to each bootstrap sample
+    model = map(strap, ~lm(tmax ~ tmin + prcp, data = .x)),
+    # Extract r-squared
+    glance_results = map(model, broom::glance),
+    # Extract coefficients
+    tidy_results = map(model, broom::tidy)
+  )
+
+# === EXTRACT R-SQUARED ===
+r_squared_results = boot_results |>
+  select(glance_results) |>
+  unnest(glance_results) |>
+  select(r.squared)
+
+# === EXTRACT BETA1 * BETA2 ===
+beta_product_results = boot_results |>
+  select(.id, tidy_results) |>
+  unnest(tidy_results) |>
+  select(.id, term, estimate) |>
+  filter(term %in% c("tmin", "prcp")) |>
+  pivot_wider(
+    names_from = term,
+    values_from = estimate
+  ) |>
+  mutate(
+    beta_product = tmin * prcp
+  ) |>
+  select(beta_product)
+
+# Combine results
+bootstrap_estimates = bind_cols(
+  r_squared_results,
+  beta_product_results
+)
+
+# === PLOT R-SQUARED DISTRIBUTION ===
+r2_plot = bootstrap_estimates |>
+  ggplot(aes(x = r.squared)) +
+  geom_histogram(bins = 50, fill = "steelblue", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(r.squared)), 
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Distribution of R² from 5000 Bootstrap Samples",
+    x = "R²",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12))
+
+print(r2_plot)
+
+# === PLOT BETA PRODUCT DISTRIBUTION ===
+beta_plot = bootstrap_estimates |>
+  ggplot(aes(x = beta_product)) +
+  geom_histogram(bins = 50, fill = "coral", alpha = 0.8) +
+  geom_vline(aes(xintercept = mean(beta_product, na.rm = TRUE)), 
+             color = "red", linetype = "dashed", linewidth = 1) +
+  labs(
+    title = "Distribution of β̂₁ × β̂₂ from 5000 Bootstrap Samples",
+    x = "β̂₁ × β̂₂ (tmin × prcp)",
+    y = "Count"
+  ) +
+  theme_minimal() +
+  theme(plot.title = element_text(face = "bold", size = 12))
+
+print(beta_plot)
+
+# === CALCULATE 95% CI ===
+r2_ci = quantile(bootstrap_estimates$r.squared, c(0.025, 0.975), na.rm = TRUE)
+beta_ci = quantile(bootstrap_estimates$beta_product, c(0.025, 0.975), na.rm = TRUE)
+
+# Summary statistics
+summary_table = tibble(
+  Statistic = c("R²", "β̂₁ × β̂₂"),
+  Mean = c(mean(bootstrap_estimates$r.squared, na.rm = TRUE),
+           mean(bootstrap_estimates$beta_product, na.rm = TRUE)),
+  `CI Lower (2.5%)` = c(r2_ci[1], beta_ci[1]),
+  `CI Upper (97.5%)` = c(r2_ci[2], beta_ci[2])
+)
+
+knitr::kable(
+  summary_table,
+  digits = 4,
+  caption = "Bootstrap Estimates and 95% Confidence Intervals"
+)
+```
+
+## Problem 2: Bootstrap Analysis of Weather Data
+
+### Model and Bootstrap Procedure
+
+We fit a simple linear regression model predicting maximum temperature (`tmax`) using minimum temperature (`tmin`) and precipitation (`prcp`) as predictors. Using 5000 bootstrap samples, we estimated the distribution of two quantities: R² and the product of coefficients β̂₁ × β̂₂.
+
+### Distribution of R²
+
+The distribution of R² is approximately normal and tightly concentrated, with values ranging from approximately 0.88 to 0.94. The mean R² is 0.9123, with a 95% confidence interval of (0.8933, 0.9275). This indicates that the model consistently explains about 89-93% of the variance in maximum temperature across bootstrap samples. The narrow, symmetric distribution suggests very stable model performance, which is expected given the strong physical relationship between minimum and maximum daily temperatures.
+
+### Distribution of β̂₁ × β̂₂
+
+The distribution of β̂₁ × β̂₂ shows a left skew centered near zero, with mean -0.0018 and 95% confidence interval (-0.0051, 0.0013). The confidence interval includes zero, suggesting that the product of these coefficients is not significantly different from zero.
+
+This distribution pattern occurs because:
+
+* β̂₁ (coefficient for `tmin`) is consistently positive and stable across all bootstrap samples, reflecting the strong positive relationship between minimum and maximum temperatures
+* β̂₂ (coefficient for `prcp`) is small and negative on average, but highly variable across samples, with values fluctuating around zero
+* When β̂₂ is near zero or occasionally positive in some bootstrap samples, the product varies considerably
+
+The left skew indicates that in some bootstrap samples, precipitation has a stronger negative association with maximum temperature (after controlling for minimum temperature), creating larger negative products. However, the concentration of values near zero and the confidence interval crossing zero suggest that precipitation's effect on maximum temperature is weak and inconsistent once minimum temperature is accounted for. This makes sense meteorologically, as minimum temperature is by far the strongest predictor of maximum temperature on the same day.
+
+```{r problem3, message=FALSE, warning=FALSE}
+library(tidyverse)
+library(modelr)
+library(broom)
+
+# === LOAD AND CLEAN DATA ===
+birthweight = read_csv("data/birthweight.csv") |>
+  # Convert numeric to factor where appropriate
+  mutate(
+    babysex = factor(babysex, levels = c(1, 2), labels = c("Male", "Female")),
+    frace = factor(frace, levels = c(1, 2, 3, 4, 8, 9), 
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other", "Unknown")),
+    mrace = factor(mrace, levels = c(1, 2, 3, 4, 8), 
+                   labels = c("White", "Black", "Asian", "Puerto Rican", "Other")),
+    malform = factor(malform, levels = c(0, 1), labels = c("Absent", "Present"))
+  )
+
+# Check for missing data
+missing_summary = birthweight |>
+  summarise(across(everything(), ~sum(is.na(.)))) |>
+  pivot_longer(everything(), names_to = "variable", values_to = "n_missing") |>
+  filter(n_missing > 0)
+
+# Display if there are missing values
+if (nrow(missing_summary) > 0) {
+  knitr::kable(missing_summary, caption = "Missing Data Summary")
+} else {
+  cat("No missing data detected.\n")
+}
+
+# === PROPOSED MODEL ===
+# Model based on literature and clinical significance:
+# - Baby's physical characteristics (length, head circumference)
+# - Gestational age
+# - Mother's characteristics (age, pre-pregnancy BMI, weight gain)
+# - Smoking during pregnancy
+# - Previous pregnancy history (parity)
+
+my_model = lm(
+  bwt ~ blength + bhead + gaweeks + 
+        momage + ppbmi + wtgain + 
+        smoken + parity + 
+        babysex + mrace,
+  data = birthweight
+)
+
+# Model summary
+my_model |>
+  broom::tidy() |>
+  knitr::kable(digits = 3, caption = "My Proposed Model: Regression Coefficients")
+
+my_model |>
+  broom::glance() |>
+  knitr::kable(digits = 3, caption = "My Proposed Model: Model Statistics")
+
+# === RESIDUAL PLOT ===
+birthweight |>
+  add_predictions(my_model) |>
+  add_residuals(my_model) |>
+  ggplot(aes(x = pred, y = resid)) +
+  geom_point(alpha = 0.3, size = 0.5) +
+  geom_hline(yintercept = 0, color = "red", linetype = "dashed") +
+  geom_smooth(se = FALSE, color = "blue", linewidth = 0.8) +
+  labs(
+    title = "Residuals vs Fitted Values",
+    x = "Fitted Values (Predicted Birth Weight, grams)",
+    y = "Residuals"
+  ) +
+  theme_minimal()
+
+# === COMPARISON MODELS ===
+# Model A: Main effects only
+model_a = lm(bwt ~ blength + gaweeks, data = birthweight)
+
+# Model B: Three-way interaction
+model_b = lm(bwt ~ bhead * blength * babysex, data = birthweight)
+
+# === CROSS-VALIDATION ===
+set.seed(123)
+
+cv_df = crossv_mc(birthweight, 100) |>
+  mutate(
+    # Fit models to training data
+    my_mod = map(train, ~lm(
+      bwt ~ blength + bhead + gaweeks + momage + ppbmi + wtgain + 
+            smoken + parity + babysex + mrace, 
+      data = .x)),
+    mod_a = map(train, ~lm(bwt ~ blength + gaweeks, data = .x)),
+    mod_b = map(train, ~lm(bwt ~ bhead * blength * babysex, data = .x))
+  ) |>
+  mutate(
+    # Calculate RMSE on test data
+    rmse_my = map2_dbl(my_mod, test, ~rmse(.x, .y)),
+    rmse_a = map2_dbl(mod_a, test, ~rmse(.x, .y)),
+    rmse_b = map2_dbl(mod_b, test, ~rmse(.x, .y))
+  )
+
+# Compare RMSE
+cv_results = cv_df |>
+  select(starts_with("rmse")) |>
+  pivot_longer(
+    everything(),
+    names_to = "model",
+    values_to = "rmse",
+    names_prefix = "rmse_"
+  ) |>
+  mutate(
+    model = case_when(
+      model == "my" ~ "My Model",
+      model == "a" ~ "Model A (Main Effects)",
+      model == "b" ~ "Model B (Interactions)"
+    )
+  )
+
+# Plot RMSE comparison
+cv_results |>
+  ggplot(aes(x = model, y = rmse, fill = model)) +
+  geom_violin(alpha = 0.5) +
+  geom_boxplot(width = 0.3, alpha = 0.7) +
+  labs(
+    title = "Cross-Validated Prediction Error Comparison",
+    x = "Model",
+    y = "Root Mean Squared Error (RMSE)"
+  ) +
+  theme_minimal() +
+  theme(legend.position = "none")
+
+# Summary statistics
+cv_summary = cv_results |>
+  group_by(model) |>
+  summarise(
+    mean_rmse = mean(rmse),
+    sd_rmse = sd(rmse),
+    .groups = "drop"
+  ) |>
+  arrange(mean_rmse)
+
+knitr::kable(
+  cv_summary,
+  digits = 2,
+  caption = "Cross-Validation Results: Mean RMSE by Model"
+)
+```
+## Problem 3: Birth Weight Regression Analysis
+
+### Data Cleaning
+
+The birthweight dataset contains information on 4,342 children. We converted categorical variables (`babysex`, `frace`, `mrace`, `malform`) from numeric to factor format for appropriate interpretation. No missing data was detected in the dataset.
+
+### Proposed Model and Modeling Process
+
+I proposed a regression model based on clinical and biological considerations for factors affecting birth weight:
+
+**Selected predictors:**
+
+* Baby characteristics: `blength` (body length), `bhead` (head circumference), `babysex`
+* Gestational factors: `gaweeks` (gestational age)
+* Maternal health: `momage` (maternal age), `ppbmi` (pre-pregnancy BMI), `wtgain` (weight gain during pregnancy)
+* Risk factors: `smoken` (cigarettes per day)
+* Maternal demographics: `mrace` (maternal race)
+* Pregnancy history: `parity` (previous live births)
+
+**Rationale:**
+
+This model combines well-established predictors from medical literature. Baby's physical measurements (`blength`, `bhead`) are expected to be the strongest predictors as they directly reflect fetal growth. Gestational age captures pregnancy duration, which fundamentally determines development time. Maternal factors (BMI, weight gain, smoking) represent the quality of the intrauterine environment affecting fetal nutrition and development. The model achieved R² = 0.714, explaining about 71% of variance in birth weight.
+
+**Key findings from coefficients:**
+
+* Each additional centimeter of baby length is associated with a 76.5 gram increase in birth weight
+* Each additional centimeter of head circumference is associated with a 132.0 gram increase
+* Each additional week of gestation adds 11.3 grams
+* Each cigarette smoked per day during pregnancy is associated with a 4.6 gram decrease in birth weight
+* Female babies are about 31.4 grams heavier than male babies on average
+* Significant racial disparities exist, with Black, Asian, and Puerto Rican mothers having babies 100-143 grams lighter on average compared to White mothers, even after controlling for other factors
+
+### Residual Analysis
+
+The residual plot shows relatively random scatter around zero for most of the fitted value range, suggesting reasonable model fit. The plot reveals slight heteroscedasticity, with residuals showing somewhat more variability at lower fitted values (lighter babies). The smoothed blue line shows a slight downward curve at the extremes, suggesting potential non-linearity or the presence of outliers at very low birth weights. Most residuals fall within ±1000 grams, with a few extreme outliers beyond ±2000 grams. These outliers may represent unusual clinical cases such as severe growth restriction or measurement errors, warranting further investigation in a clinical setting.
+
+### Model Comparison
+
+Using 100-fold cross-validation, I compared three models:
+
+* **Model A (Main Effects Only)**: `bwt ~ blength + gaweeks` - uses only baby length and gestational age
+* **Model B (With Interactions)**: `bwt ~ bhead * blength * babysex` - includes head circumference, length, sex, and all interactions including the three-way interaction
+* **My Model**: Comprehensive model with baby characteristics, maternal health factors, and demographics
+
+**Cross-Validation Results:**
+
+My proposed model achieved the lowest mean RMSE (275.10), demonstrating superior predictive performance. Model A, using only two main effects, had the highest RMSE (330.71), indicating that these two predictors alone are insufficient for accurate prediction. Model B (288.38) performs better than Model A but is outperformed by my model, suggesting that while interactions between physical measurements capture some complexity, the inclusion of maternal health and demographic factors provides more comprehensive prediction.
+
+The results indicate that a model incorporating both baby characteristics and maternal factors is optimal for predicting birth weight. The relatively small standard deviations in RMSE across cross-validation folds (7.93 for my model) suggest stable and reliable performance. While Model B's interaction terms capture biological relationships between physical measurements, my model's advantage comes from including modifiable risk factors (smoking, weight gain) and important demographic variables that have both predictive value and clinical relevance for targeted interventions.
